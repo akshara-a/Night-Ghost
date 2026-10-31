@@ -1,0 +1,1 @@
+# Night Ghost test suite

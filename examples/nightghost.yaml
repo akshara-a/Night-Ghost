@@ -1,0 +1,47 @@
+# Night Ghost Configuration Example
+# Place this at your repository root as nightghost.yaml
+
+model:
+  provider: ollama            # Local runner: ollama or llamacpp
+  name: gemma4:e2b            # Installed local model
+  temperature: 0.2
+  context_window: 8192
+  api_base: http://localhost:11434
+
+task:
+  file: .nightghost/task.md   # Location of evening task note
+
+scope:
+  allow:
+    - "src/**"
+    - "tests/**"
+  deny:
+    - ".env*"
+    - "migrations/**"
+    - "**/*.pem"
+    - "**/*.key"
+    - ".github/**"
+    - "*.lock"
+    - ".git/**"
+    - "nightghost.yaml"
+
+commands:
+  test: "pytest -q"
+  lint: "ruff check ."
+  format: "ruff format ."
+  timeout_seconds: 300
+
+limits:
+  max_steps: 8
+  max_files_changed: 15
+  max_lines_changed: 800
+  max_runtime_minutes: 120
+  max_retries_per_step: 2
+
+safety:
+  network: "off"
+  never_edit_existing_assertions: true
+  require_green_baseline: false
+
+schedule:
+  at: "01:00"

@@ -1,0 +1,51 @@
+# Night Ghost Report: {{ date }}
+Task: "{{ task }}"
+Branch: {{ branch }} ({{ commits_count }} commits, {{ files_count }} files, +{{ lines_added }} / -{{ lines_removed }})
+Model: {{ model_name }} ({{ model_provider }}) | Runtime: {{ runtime_str }}{% if is_dry_run %} | Mode: DRY RUN (Simulation){% endif %}
+
+## Result at a glance
+{{ result_icon }} Tests: {{ baseline_passed }} -> {{ final_passed }} passing ({{ final_failed }} failing){% if coverage_str %} | Coverage {{ coverage_str }}{% endif %}
+
+## What I did
+{% if is_dry_run %}
+- Simulation mode: Evaluated planned steps against test baseline without modifying files or commits. Run live with `nightghost run` to apply changes.
+{% elif completed_steps %}
+{% for step in completed_steps %}
+{{ loop.index }}. {{ step.title }}: commit {{ step.commit_sha }}
+{% endfor %}
+{% else %}
+- (No steps committed during this run)
+{% endif %}
+
+## Needs your judgment
+{% if judgment_items %}
+{% for item in judgment_items %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- None. All committed changes are self-contained and behavior-preserving.
+{% endif %}
+
+## Skipped / failed
+{% if skipped_steps %}
+{% for item in skipped_steps %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- None. All attempted steps passed validation.
+{% endif %}
+
+## Blocked by guardrails
+{% if blocked_items %}
+{% for item in blocked_items %}
+- {{ item }}
+{% endfor %}
+{% else %}
+- None. All file and command requests adhered to security rules.
+{% endif %}
+
+## How to review
+```bash
+git diff {{ base_branch }}..{{ branch }}
+nightghost discard   # to throw it all away
+```

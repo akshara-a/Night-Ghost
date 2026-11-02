@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import List
 from pydantic import BaseModel, Field
 
 from nightghost.config import NightGhostConfig
 from nightghost.context import ProjectContext
-from nightghost.llm.base import BaseLLMClient, LLMMessage, LLMResponse
+from nightghost.llm.base import BaseLLMClient, LLMMessage
 
 
 class PlannedStep(BaseModel):

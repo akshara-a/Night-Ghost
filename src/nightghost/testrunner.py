@@ -3,11 +3,16 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional, Tuple
-from pydantic import BaseModel, Field
+from typing import List, Optional, Tuple
+from pydantic import BaseModel
+
+from nightghost import netguard
 
 
 class TestResult(BaseModel):
@@ -23,6 +28,7 @@ class TestResult(BaseModel):
     stdout: str = ""
     stderr: str = ""
     summary: str = ""
+    parse_mode: str = "regex"  # junit | regex | vitest | exit-code | error
 
 
 # Regex patterns for pytest output parsing (supports both quiet and standard outputs)
@@ -57,65 +63,135 @@ class TestRunner:
         self.timeout_seconds = timeout_seconds
         self.network = network
 
+    @staticmethod
+    def split_command(cmd: str) -> List[str]:
+        """Split a command line into argv. Never goes through a shell, so metacharacters are inert."""
+        if os.name == "nt":
+            parts = shlex.split(cmd, posix=False)
+            return [
+                p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts
+            ]
+        return shlex.split(cmd)
+
+    @staticmethod
+    def _is_pytest(argv: List[str]) -> bool:
+        if not argv:
+            return False
+        stem = Path(argv[0]).stem.lower()
+        if stem in ("pytest", "py.test"):
+            return True
+        return stem.startswith("python") and argv[1:3] == ["-m", "pytest"]
+
     def run(self, cmd: str) -> TestResult:
         """Run the test command safely, capturing output and parsing results."""
         start_time = time.time()
-        
-        # Prepare environment blocking common proxy/egress variables if network is off
+
         env = os.environ.copy()
         if self.network == "off":
-            env["http_proxy"] = "http://127.0.0.1:0"
-            env["https_proxy"] = "http://127.0.0.1:0"
-            env["HTTP_PROXY"] = "http://127.0.0.1:0"
-            env["HTTPS_PROXY"] = "http://127.0.0.1:0"
-            env["ALL_PROXY"] = "http://127.0.0.1:0"
-            env["NO_PROXY"] = ""
-            env["PIP_NO_INDEX"] = "1"
-            env["npm_config_offline"] = "true"
+            netguard.apply_to_env(env)
 
-        # On Windows, commands with spaces or complex arguments run through shell or parsed args
-        use_shell = os.name == "nt"
-        
         try:
-            proc = subprocess.run(
-                cmd if use_shell else shlex.split(cmd),
-                cwd=str(self.repo_root),
-                shell=use_shell,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                env=env,
-                encoding="utf-8",
-                errors="replace",
-            )
-            elapsed = time.time() - start_time
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
-            exit_code = proc.returncode
+            argv = self.split_command(cmd)
+        except ValueError as e:
+            return self._error_result(start_time, f"Could not parse command: {e}")
+        if not argv:
+            return self._error_result(start_time, "Empty test command")
 
-        except subprocess.TimeoutExpired as e:
-            elapsed = time.time() - start_time
-            stdout = e.stdout or "" if hasattr(e, "stdout") and e.stdout else ""
-            stderr = e.stderr or "" if hasattr(e, "stderr") and e.stderr else ""
-            return TestResult(
-                exit_code=-1,
-                duration=elapsed,
-                stdout=stdout,
-                stderr=stderr,
-                summary=f"Test timed out after {self.timeout_seconds}s",
-                failed=1,
-            )
-        except Exception as e:
-            elapsed = time.time() - start_time
-            return TestResult(
-                exit_code=-2,
-                duration=elapsed,
-                stderr=str(e),
-                summary=f"Execution error: {e}",
-                failed=1,
-            )
+        exe = shutil.which(argv[0], path=env.get("PATH"))
+        if exe is None:
+            return self._error_result(start_time, f"Command not found: {argv[0]}")
+        argv[0] = exe
 
-        return self.parse_output(stdout, stderr, exit_code, elapsed)
+        junit_path: Optional[Path] = None
+        if self._is_pytest(argv) and not any(a.startswith("--junitxml") for a in argv):
+            fd, tmp = tempfile.mkstemp(prefix="nightghost-junit-", suffix=".xml")
+            os.close(fd)
+            junit_path = Path(tmp)
+            argv.append(f"--junitxml={junit_path}")
+
+        try:
+            try:
+                proc = subprocess.run(
+                    argv,
+                    cwd=str(self.repo_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    env=env,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                elapsed = time.time() - start_time
+                result = self.parse_output(
+                    proc.stdout or "", proc.stderr or "", proc.returncode, elapsed
+                )
+                if junit_path is not None:
+                    self._apply_junit(result, junit_path)
+                return result
+            except subprocess.TimeoutExpired as e:
+                elapsed = time.time() - start_time
+                return TestResult(
+                    exit_code=-1,
+                    duration=elapsed,
+                    stdout=_as_text(e.stdout),
+                    stderr=_as_text(e.stderr),
+                    summary=f"Test timed out after {self.timeout_seconds}s",
+                    failed=1,
+                    parse_mode="error",
+                )
+            except Exception as e:  # noqa: BLE001 - surfaced as a failed run, never crashes the pipeline
+                return self._error_result(start_time, f"Execution error: {e}")
+        finally:
+            if junit_path is not None:
+                junit_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _error_result(start_time: float, message: str) -> TestResult:
+        return TestResult(
+            exit_code=-2,
+            duration=time.time() - start_time,
+            stderr=message,
+            summary=message,
+            failed=1,
+            parse_mode="error",
+        )
+
+    @staticmethod
+    def _apply_junit(result: TestResult, junit_path: Path) -> None:
+        """Override regex-scraped counts with pytest's structured JUnit XML when available."""
+        try:
+            root = ET.parse(junit_path).getroot()
+        except (ET.ParseError, OSError):
+            return
+        suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+        if not suites:
+            return
+        total = failures = errors = skipped = 0
+        for suite in suites:
+            total += int(suite.get("tests", 0))
+            failures += int(suite.get("failures", 0))
+            errors += int(suite.get("errors", 0))
+            skipped += int(suite.get("skipped", 0))
+        result.failed = failures
+        result.errors = errors
+        result.skipped = max(skipped - result.xfailed, 0)
+        result.passed = max(total - failures - errors - skipped, 0)
+        result.summary = TestRunner._summarize(result)
+        result.parse_mode = "junit"
+
+    @staticmethod
+    def _summarize(r: TestResult) -> str:
+        parts = []
+        for count, label in (
+            (r.passed, "passed"),
+            (r.failed, "failed"),
+            (r.skipped, "skipped"),
+            (r.xfailed, "xfailed"),
+            (r.errors, "errors"),
+        ):
+            if count:
+                parts.append(f"{count} {label}")
+        return ", ".join(parts) if parts else ("Passed" if r.exit_code == 0 else "Failed")
 
     def parse_output(
         self,
@@ -132,6 +208,7 @@ class TestRunner:
         skipped = 0
         xfailed = 0
         errors = 0
+        mode = "regex"
 
         # Try pytest parsing
         match = PYTEST_SUMMARY_REGEX.search(combined)
@@ -150,6 +227,7 @@ class TestRunner:
             # Try Vitest/Jest parsing
             vitest_match = VITEST_SUMMARY_REGEX.search(combined)
             if vitest_match:
+                mode = "vitest"
                 if vitest_match.group("passed"):
                     passed = int(vitest_match.group("passed"))
                 if vitest_match.group("failed"):
@@ -157,7 +235,8 @@ class TestRunner:
                 if vitest_match.group("skipped"):
                     skipped = int(vitest_match.group("skipped"))
             else:
-                # Fallback: if exit code 0, assume at least 1 pass, else 1 fail
+                # Fallback: no recognisable summary; trust only the exit code
+                mode = "exit-code"
                 if exit_code == 0:
                     passed = 1
                 else:
@@ -198,6 +277,7 @@ class TestRunner:
             stdout=stdout,
             stderr=stderr,
             summary=summary_str,
+            parse_mode=mode,
         )
 
     @staticmethod
@@ -230,3 +310,11 @@ class TestRunner:
             return True, f"Test suite failed with exit code {current.exit_code}: {current.summary}"
 
         return False, "Tests verified: no regressions detected"
+
+
+def _as_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)

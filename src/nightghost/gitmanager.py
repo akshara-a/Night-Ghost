@@ -3,8 +3,10 @@ from __future__ import annotations
 import datetime
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 from pydantic import BaseModel, Field
+
+from nightghost.errors import GitError
 
 
 class DiffStats(BaseModel):
@@ -155,13 +157,86 @@ class GitManager:
             return proc.stdout.strip()
         return ""
 
-    def discard_branch(self, ghost_branch: str, restore_branch: str = "main") -> None:
+    # ---- branch helpers ----------------------------------------------------------------------
+
+    def branch_exists(self, name: str) -> bool:
+        proc = self._run_git(["rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], check=False)
+        return proc.returncode == 0
+
+    def get_head_sha(self) -> Optional[str]:
+        proc = self._run_git(["rev-parse", "HEAD"], check=False)
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    def default_branch(self) -> str:
+        """Best guess at the repo's mainline branch (origin/HEAD, then main, then master)."""
+        proc = self._run_git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            name = proc.stdout.strip().replace("refs/remotes/origin/", "", 1)
+            if self.branch_exists(name):
+                return name
+        for candidate in ("main", "master"):
+            if self.branch_exists(candidate):
+                return candidate
+        current = self.get_current_branch()
+        return current if current != "HEAD" else "main"
+
+    def list_ghost_branches(self) -> List[str]:
+        proc = self._run_git(
+            ["for-each-ref", "--format=%(refname:short)", "refs/heads/nightghost/"], check=False
+        )
+        return sorted(line.strip() for line in proc.stdout.splitlines() if line.strip())
+
+    def checkout(self, ref: str) -> None:
+        proc = self._run_git(["checkout", ref], check=False)
+        if proc.returncode != 0:
+            raise GitError(f"Could not check out '{ref}': {proc.stderr.strip() or proc.stdout.strip()}")
+
+    def apply_snapshot(self, sha: str) -> bool:
+        """Re-apply a WIP snapshot created by create_wip_snapshot(). Returns True on success."""
+        proc = self._run_git(["stash", "apply", sha], check=False)
+        return proc.returncode == 0
+
+    def diff_range(self, base: str, branch: str, stat: bool = False) -> str:
+        args = ["diff"] + (["--stat"] if stat else []) + [f"{base}...{branch}"]
+        proc = self._run_git(args, check=False)
+        if proc.returncode != 0:
+            raise GitError(proc.stderr.strip() or "git diff failed")
+        return proc.stdout
+
+    def merge_branch(self, ghost_branch: str, into: str) -> None:
+        """Merge a ghost branch into `into` with a merge commit. Aborts cleanly on conflict."""
+        if not self.branch_exists(ghost_branch):
+            raise GitError(f"Branch '{ghost_branch}' does not exist.")
+        if self.has_uncommitted_changes():
+            raise GitError("Working tree has uncommitted changes; commit or stash them before merging.")
+        self.checkout(into)
+        proc = self._run_git(
+            ["merge", "--no-ff", "-m", f"Merge {ghost_branch} (Night Ghost)", ghost_branch],
+            check=False,
+        )
+        if proc.returncode != 0:
+            self._run_git(["merge", "--abort"], check=False)
+            raise GitError(
+                f"Merge of '{ghost_branch}' into '{into}' failed and was aborted: "
+                f"{(proc.stdout + proc.stderr).strip()}"
+            )
+
+    def delete_branch(self, name: str, force: bool = False) -> None:
+        proc = self._run_git(["branch", "-D" if force else "-d", name], check=False)
+        if proc.returncode != 0:
+            raise GitError(proc.stderr.strip() or f"Could not delete branch '{name}'")
+
+    def discard_branch(self, ghost_branch: str, restore_branch: Optional[str] = "main") -> None:
         """Discard the ghost branch and return cleanly to the restore branch."""
-        # Ensure we checkout the restore branch
-        proc_check = self._run_git(["rev-parse", "--verify", restore_branch], check=False)
-        if proc_check.returncode != 0:
-            restore_branch = "master"
-        
-        self._run_git(["checkout", restore_branch], check=False)
-        # Delete the ghost branch
-        self._run_git(["branch", "-D", ghost_branch], check=False)
+        if not self.branch_exists(ghost_branch):
+            raise GitError(f"Branch '{ghost_branch}' does not exist.")
+        if not restore_branch or not self.branch_exists(restore_branch):
+            restore_branch = self.default_branch()
+        if restore_branch == ghost_branch:
+            raise GitError("Cannot restore to the branch being discarded.")
+
+        if self.get_current_branch() == ghost_branch:
+            # Throw away anything uncommitted on the ghost branch so the checkout cannot fail.
+            self.revert_working_directory()
+        self.checkout(restore_branch)
+        self.delete_branch(ghost_branch, force=True)

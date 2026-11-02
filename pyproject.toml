@@ -52,7 +52,8 @@ nightghost = ["templates/*.j2"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-v --ignore=tests/fixtures"
+addopts = "-v --ignore=tests/fixtures -m \"not ollama\""
+markers = ["ollama: needs a running Ollama server with the configured model (run with -m ollama)"]
 norecursedirs = ["fixtures", ".git", ".nightghost"]
 
 [tool.ruff]

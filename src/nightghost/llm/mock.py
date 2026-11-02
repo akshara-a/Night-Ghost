@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
-from nightghost.llm.base import BaseLLMClient, LLMMessage, LLMResponse, ToolCall, ToolDefinition
+from typing import Callable, List, Optional
+from nightghost.llm.base import BaseLLMClient, LLMMessage, LLMResponse, ToolDefinition
 
 
 class MockLLMClient(BaseLLMClient):

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ModelConfig(BaseModel):
@@ -67,6 +67,17 @@ class SafetyConfig(BaseModel):
 
 class ScheduleConfig(BaseModel):
     at: str = Field(default="01:00", description="Time of night to run (HH:MM 24h format)")
+
+    @field_validator("at")
+    @classmethod
+    def _valid_time(cls, v: str) -> str:
+        parts = v.split(":")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            raise ValueError("schedule.at must look like HH:MM (24h), e.g. 01:30")
+        hour, minute = int(parts[0]), int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("schedule.at must be a valid 24h time, e.g. 01:30")
+        return f"{hour:02d}:{minute:02d}"
 
 
 class NightGhostConfig(BaseModel):

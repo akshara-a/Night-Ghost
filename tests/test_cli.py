@@ -49,9 +49,15 @@ def test_cli_sleep_and_schedule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert res_sleep.exit_code == 0
     assert "Armed For Sleep" in res_sleep.output
 
+    assert (tmp_path / ".nightghost" / "armed.json").is_file()
+
     res_sched = runner.invoke(app, ["schedule"])
     assert res_sched.exit_code == 0
-    assert "nightghost run" in res_sched.output
+    assert "run --scheduled" in res_sched.output
+
+    res_cancel = runner.invoke(app, ["sleep", "--cancel"])
+    assert res_cancel.exit_code == 0
+    assert not (tmp_path / ".nightghost" / "armed.json").exists()
 
 
 def test_cli_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import datetime
-import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from nightghost.config import NightGhostConfig
 from nightghost.gitmanager import GitManager
-from nightghost.guardrail import Guardrail, GuardrailResult
-from nightghost.llm.base import BaseLLMClient, LLMMessage, ToolCall
+from nightghost.guardrail import Guardrail
+from nightghost.llm.base import BaseLLMClient, LLMMessage
 from nightghost.planner import ExecutionPlan, PlannedStep
 from nightghost.testrunner import TestResult, TestRunner
-from nightghost.tools import ToolExecutionResult, ToolRegistry
+from nightghost.tools import ToolRegistry
 
 
 class ActionLogEntry(BaseModel):
@@ -52,6 +51,7 @@ class Executor:
         git_manager: GitManager,
         test_runner: TestRunner,
         log_dir: Optional[Path] = None,
+        on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ):
         self.repo_root = repo_root.resolve()
         self.config = config
@@ -61,6 +61,7 @@ class Executor:
         self.test_runner = test_runner
         self.log_dir = log_dir or (self.repo_root / ".nightghost")
         self.log_file = self.log_dir / "actions.jsonl"
+        self.on_event = on_event
         self.tools = ToolRegistry(self.repo_root, guardrail, test_runner, git_manager)
 
         self.action_logs: List[ActionLogEntry] = []
@@ -86,6 +87,12 @@ class Executor:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(entry.model_dump_json() + "\n")
+
+        if self.on_event is not None:
+            try:
+                self.on_event(event, {"step_id": step_id, "step_title": step_title, **kwargs})
+            except Exception:  # noqa: BLE001 - a UI listener must never break the pipeline
+                pass
 
         return entry
 
@@ -272,6 +279,23 @@ class Executor:
             regressed, reg_reason = self.test_runner.check_regression(
                 baseline_test, test_res, self.config.safety.require_green_baseline
             )
+
+            if not regressed and test_res.exit_code == 0 and not self.git.has_uncommitted_changes():
+                # Nothing was written, so there is nothing to commit (and nothing to verify).
+                self.log(
+                    "STEP_NO_CHANGES",
+                    step_id=step.id,
+                    step_title=step.title,
+                    reason="The model made no file changes",
+                )
+                return StepExecutionResult(
+                    step_id=step.id,
+                    title=step.title,
+                    status="skipped",
+                    retries_used=retries_used,
+                    failure_reason="The model made no file changes",
+                    test_result=test_res,
+                )
 
             if not regressed and test_res.exit_code == 0:
                 # Tests pass and no regression! Commit the step!

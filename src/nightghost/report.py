@@ -8,8 +8,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field
 
 from nightghost.config import NightGhostConfig
-from nightghost.gitmanager import DiffStats, GitManager
-from nightghost.testrunner import TestResult
+from nightghost.gitmanager import GitManager
 
 
 class ReportData(BaseModel):

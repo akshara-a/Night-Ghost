@@ -24,7 +24,7 @@ Developers and indie hackers end the day with half-finished code. By morning, co
 
 | Principle | How It Is Enforced |
 |---|---|
-| **Fully Local** | Runs open-weight models via Ollama or llama.cpp. Subprocesses run with network egress blocked (`ALL_PROXY=http://127.0.0.1:0`). |
+| **Fully Local** | Runs open-weight models via Ollama or llama.cpp. Test subprocesses run with best-effort network blocking: poisoned proxy variables plus a socket shim that refuses non-loopback connections and DNS lookups in Python processes. (Not an OS sandbox; non-Python tools are only covered by the proxy variables.) |
 | **Only Touches Allowed Files** | Explicit `allow` / `deny` globs in `nightghost.yaml`. All path checks happen in Python code, resolving symlinks and directory traversal. |
 | **Small, Safe, Well-Tested Changes** | Diff size caps, line budgets, and test-gated commits. Any test regression immediately rolls back that step. |
 | **Assertion Protection** | Hard rule: detecting edits to existing test assertions blocks the write immediately to prevent models from "fixing" tests by weakening them. |
@@ -101,44 +101,46 @@ nightghost sleep
 ```
 
 ### 🌃 Night: Automatic Execution
-Triggered at your scheduled time (e.g. 01:00 AM) by cron or systemd:
+Install the nightly schedule once (Task Scheduler on Windows, launchd on macOS, cron on Linux) and arm the repo:
 
 ```bash
-nightghost run
+nightghost schedule --install   # or: nightghost sleep --install
+nightghost doctor               # verify git, config, test command and model first
 ```
+
+Scheduled runs (`nightghost run --scheduled`) only execute while the repo is armed. Disarm with `nightghost sleep --cancel`.
 
 ### 🌅 Morning: Review Your Progress
-When you start your day:
-
 ```bash
-# Read the transparent morning summary
-nightghost report
-
-# Inspect the isolated branch diff
-git diff main..nightghost/$(date +%Y-%m-%d)
+nightghost report               # the transparent morning summary
+nightghost diff                 # what changed (add --stat for a summary)
+nightghost accept               # merge the ghost branch into your base branch
+nightghost discard              # ...or throw it all away
 ```
 
-- If satisfied: merge the branch or cherry-pick the commits.
-- If not: discard cleanly with one command:
-  ```bash
-  nightghost discard
-  ```
+Your original branch is always restored after a run, and any uncommitted work is snapshotted and re-applied.
 
 ---
 
 ## 📋 CLI Reference
 
+Global options: `-C/--repo PATH`, `--config PATH`, `-v/--verbose`, `--version`. Shell completion: `nightghost --install-completion`.
+
 | Command | Description |
 |---|---|
-| `nightghost init` | Scaffold `nightghost.yaml` and `.nightghost/` directory. |
-| `nightghost note [TEXT]` | View or set tonight's evening task note. |
-| `nightghost run [--dry-run]` | Wake and execute the overnight pipeline (or simulate with `--dry-run`). |
-| `nightghost report [DATE]` | Render the morning report in terminal (defaults to latest). |
-| `nightghost status` | View current branch, task, baseline test status, and kill switch state. |
-| `nightghost sleep` | Arm the overnight run. |
-| `nightghost schedule` | Generate copy-paste crontab or systemd timer configurations. |
-| `nightghost stop` | Emergency kill switch: creates `.nightghost/STOP` to halt execution. |
-| `nightghost discard` | Delete the ghost branch and return cleanly to your base branch. |
+| `nightghost init [--yes] [--model M]` | Scaffold `nightghost.yaml` (auto-detects the test command) and `.nightghost/`; offers to add it to `.gitignore`. |
+| `nightghost doctor` | Check git, config, test command, model and task note, with fix hints. Exits 1 on failure. |
+| `nightghost note [TEXT]` | View or set the task note. `note -` reads stdin; `note -e` opens `$EDITOR`. |
+| `nightghost run [--dry-run] [--json]` | Run the pipeline with live progress. Exit codes: `0` success, `1` error, `2` partial (steps reverted/skipped). |
+| `nightghost log [-n N] [-f]` | Show or follow the structured action log. |
+| `nightghost report [DATE] [--list]` | Render a morning report (defaults to latest). |
+| `nightghost diff [BRANCH] [--stat]` | Diff of the ghost branch against its base. |
+| `nightghost accept [BRANCH] [--delete]` | Merge the ghost branch into its base with a merge commit. |
+| `nightghost discard [BRANCH]` | Delete the ghost branch and return to your base branch. |
+| `nightghost status [--json]` | Branch, armed state, model health, kill switch, ghost branches, last run. |
+| `nightghost sleep [--install\|--cancel]` | Arm (or disarm) scheduled runs. |
+| `nightghost schedule [--install\|--uninstall] [-p PLATFORM]` | Show or install the nightly schedule. |
+| `nightghost stop` / `nightghost resume` | Engage / clear the `.nightghost/STOP` kill switch. |
 | `nightghost version` | Display current installed version. |
 
 ---

@@ -8,7 +8,7 @@
 
 | Principle | How It Is Enforced |
 |---|---|
-| **Fully Local** | Model runs entirely on your machine via Ollama or llama.cpp. Subprocesses run with network egress blocked (`ALL_PROXY=http://127.0.0.1:0`). |
+| **Fully Local** | Model runs entirely on your machine via Ollama or llama.cpp. Test subprocesses run with best-effort network blocking: poisoned proxy variables plus a `sitecustomize` socket shim that refuses non-loopback connections and DNS lookups in Python processes. This is not an OS-level sandbox; use a container or network namespace if you need hard isolation. |
 | **Only Touches Allowed Files** | Explicit `allow` / `deny` globs in `nightghost.yaml`. All path checks happen in Python code, resolving real symlinks and directory traversal, never relying on LLM obedience. |
 | **Small, Safe, Well-Tested Changes** | Diff size caps, file count caps, runtime limits, and test-gated commits. Any test regression immediately resets the working directory. |
 | **Transparent Morning Report** | Every single action is written to `actions.jsonl`. The morning markdown report is generated strictly from the structured log, not from LLM hallucination. |
